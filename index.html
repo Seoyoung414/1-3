@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OVER-ACTIVE SINGLE EYE 3D TRACKING</title>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      padding: 0;
+      width: 100vw;
+      height: 100vh;
+      background-color: #0000FF;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      perspective: 1200px;
+    }
+
+    #webcam {
+      display: none;
+    }
+
+    .space-container {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transform-style: preserve-3d;
+    }
+
+    /* 100px 간격의 선명한 1px 흰색 도트 패턴 배경 */
+    #patternBg {
+      position: absolute;
+      top: -40%;
+      left: -40%;
+      width: 180%;
+      height: 180%;
+      
+      background-color: #0000FF;
+      background-image: radial-gradient(#ffffff 1px, transparent 1px);
+      background-size: 100px 100px;
+      
+      transform: translate3d(0px, 0px, -300px);
+      transition: transform 0.12s cubic-bezier(0.1, 0.8, 0.2, 1.0);
+      will-change: transform;
+    }
+
+    #outputCanvas {
+      width: 640px;
+      height: 480px;
+      background-color: #000;
+      border: none;
+      box-shadow: none;
+      
+      transform: translate3d(0px, 0px, 150px) scaleX(-1); 
+      transition: transform 0.08s cubic-bezier(0.05, 0.7, 0.15, 1.0);
+      will-change: transform;
+      z-index: 10;
+    }
+  </style>
+</head>
+<body>
+
+  <video id="webcam" autoplay playsinline></video>
+
+  <div class="space-container">
+    <div id="patternBg"></div>
+    <canvas id="outputCanvas" width="640" height="480"></canvas>
+  </div>
+
+  <script type="module">
+    import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0";
+
+    const video = document.getElementById('webcam');
+    const canvas = document.getElementById('outputCanvas');
+    const ctx = canvas.getContext('2d');
+    const patternBg = document.getElementById('patternBg');
+
+    let faceLandmarker;
+
+    const CAM_MOVE_RANGE_X = 400;
+    const CAM_MOVE_RANGE_Y = 320;
+    const BG_MOVE_RANGE_X = 140;
+    const BG_MOVE_RANGE_Y = 100;
+
+    async function createFaceLandmarker() {
+      const filesetResolver = await FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm"
+      );
+      
+      faceLandmarker = await FaceLandmarker.createFromOptions(filesetResolver, {
+        baseOptions: {
+          modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+          delegate: "GPU"
+        },
+        runningMode: "VIDEO",
+        numFaces: 1
+      });
+
+      startWebcam();
+    }
+
+    async function startWebcam() {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: 640, height: 480 }
+        });
+        video.srcObject = stream;
+        video.addEventListener("loadeddata", predictWebcam);
+      } catch (err) {
+        console.error("웹캠 접근 실패:", err);
+      }
+    }
+
+    let lastVideoTime = -1;
+    async function predictWebcam() {
+      if (video.currentTime !== lastVideoTime) {
+        lastVideoTime = video.currentTime;
+
+        const results = faceLandmarker.detectForVideo(video, performance.now());
+
+        if (results.faceLandmarks && results.faceLandmarks.length > 0) {
+          const landmarks = results.faceLandmarks[0];
+          renderOneEyeHighlyZoomed(landmarks);
+          track3DParallaxAggressive(landmarks);
+        } else {
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          canvas.style.transform = `translate3d(0px, 0px, 150px) scaleX(-1)`;
+          patternBg.style.transform = `translate3d(0px, 0px, -300px)`;
+        }
+      }
+
+      requestAnimationFrame(predictWebcam);
+    }
+
+    function renderOneEyeHighlyZoomed(landmarks) {
+      const vWidth = video.videoWidth;
+      const vHeight = video.videoHeight;
+
+      const eyeLeft = landmarks[33];
+      const eyeRight = landmarks[133];
+      const eyeTop = landmarks[159];
+      const eyeBottom = landmarks[145];
+
+      const centerX = ((eyeLeft.x + eyeRight.x) / 2) * vWidth;
+      const centerY = ((eyeTop.y + eyeBottom.y) / 2) * vHeight;
+
+      const cropWidth = vWidth * 0.14;
+      const cropHeight = vHeight * 0.11;
+
+      const cropX = Math.max(0, Math.min(vWidth - cropWidth, centerX - cropWidth / 2));
+      const cropY = Math.max(0, Math.min(vHeight - cropHeight, centerY - cropHeight / 2));
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(
+        video,
+        cropX, cropY, cropWidth, cropHeight,
+        0, 0, canvas.width, canvas.height
+      );
+    }
+
+    function track3DParallaxAggressive(landmarks) {
+      const eyeLeft = landmarks[33];
+      const eyeRight = landmarks[133];
+      const eyeTop = landmarks[159];
+      const eyeBottom = landmarks[145];
+      const iris = landmarks[468];
+
+      const eyeWidth = eyeRight.x - eyeLeft.x;
+      const irisRelativeX = (iris.x - eyeLeft.x) / eyeWidth;
+      let gazeOffsetX = (irisRelativeX - 0.5) * 4.5;
+      gazeOffsetX = Math.max(-1, Math.min(1, gazeOffsetX));
+
+      const eyeHeight = eyeBottom.y - eyeTop.y;
+      const irisRelativeY = (iris.y - eyeTop.y) / eyeHeight;
+      let gazeOffsetY = (irisRelativeY - 0.5) * 5.0;
+      gazeOffsetY = Math.max(-1, Math.min(1, gazeOffsetY));
+
+      const camMoveX = -gazeOffsetX * CAM_MOVE_RANGE_X;
+      const camMoveY = gazeOffsetY * CAM_MOVE_RANGE_Y;
+
+      const bgMoveX = -gazeOffsetX * BG_MOVE_RANGE_X;
+      const bgMoveY = gazeOffsetY * BG_MOVE_RANGE_Y;
+
+      canvas.style.transform = `translate3d(${camMoveX}px, ${camMoveY}px, 150px) scaleX(-1)`;
+      patternBg.style.transform = `translate3d(${bgMoveX}px, ${bgMoveY}px, -300px)`;
+    }
+
+    createFaceLandmarker();
+  </script>
+
+</body>
+</html>
